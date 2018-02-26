@@ -1,8 +1,9 @@
-from typing import List
-
-import mido
+from typing import List, Union
 
 class LPD8Program():
+    """LPD8 Program Abstraction
+    Implements an LPD8 program which defines which notes and control change signals etc. each pad and knob is emitting.
+    The LPD8 can store 4 different programs which can be enabled from the device."""
     class Pad():
         def __init__(self, note:int=0, programChange:int=0, controlChange:int=0, toggle:int=0):
             self.note = note                    # type: int
@@ -23,7 +24,7 @@ class LPD8Program():
             return "LPD8 Knob; cc=%s; low=%s; high=%s" % (self.controlChange, self.low, self.high)
 
     def __init__(self):
-        self.programIndex = 0
+        self.programIndex = 0   # type: int
         self.pads = []      # type: List[LPD8Program.Pad]
         self.knobs = []     # type: List[LPD8Program.Knob]
         for i in range(8):
@@ -31,6 +32,7 @@ class LPD8Program():
             self.knobs.append(LPD8Program.Knob())
 
     def readProgram(self, sysexData: List[int]):
+        """Reads sysex program message from LPD8 device"""
         # Reference: https://github.com/charlesfleche/lpd8-editor/blob/d3c312e226f55ab0082b66e4732f5b860dc7b5fb/doc/SYSEX.md
         if not sysexData[0] == 0x47:
             raise Exception("Manufacturerbyte (1) invalid: 0x%X (should be 0x47)" % sysexData[0])
@@ -52,6 +54,7 @@ class LPD8Program():
                                                high=sysexData[42 + 3*i]))
 
     def writeProgram(self) -> List[int]:
+        """Writes sysex program message for LPD8 device"""
         # Reference: https://github.com/charlesfleche/lpd8-editor/blob/d3c312e226f55ab0082b66e4732f5b860dc7b5fb/doc/SYSEX.md
         data = []
         data += [0x47, 0x7F, 0x75, 0x61, 0x00, 0x3A]
@@ -89,5 +92,165 @@ class LPD8Program():
         return data
 
 class LPD8Device():
-    pass
+    class CB():
+        def __init__(self, note, cc, pc):
+            self.note = note
+            self.cc = cc
+            self.pc = pc
+            self.callbacks = []
 
+    def __init__(self, solveAmbiguity: bool=False):
+        # TODO: Check programs for amguity -> exception/warning if no-override is set?
+        # TODO: Update programs to be unambiguous
+
+        self.programs = [None, None, None, None]  # type: List[LPD8Program]
+        self.solveAmbiguity = solveAmbiguity
+
+        self.getDevice()
+        self.getPrograms()
+        self.checkAmbiguity()
+
+        # From this point programs must not be changed
+
+        # Set up Callback containers
+        self.cbList = []
+        for program in self.programs:
+            for pad in program.pads:
+                self.cbList.append(LPD8Device.CB(pad.note, pad.controlChange, pad.programChange))
+            for knob in program.knobs:
+                self.cbList.append(LPD8Device.CB(knob.controlChange))
+
+
+    def getDevice(self):
+        """Open midi IO to LPD8"""
+        raise NotImplementedError
+
+    def getPrograms(self):
+        for i in range(4):
+            self.writeSysex([0x47, 0x7F, 0x75, 0x63, 0x00, 0x01, 1+i])  # Request program 1 to 4
+            self.readMidi(1)    # Wait up to one second for response
+            if self.programs[i] is None:    # If response came within one second, program slot will be filled
+                raise Exception("Reading Program data timed out")
+
+    def checkAmbiguity(self):
+        # Iterate over all settings and make sure they're unique. Otherwise throw exception
+        for program in self.programs:
+            for pad in program.pads:
+                ambiguities = self.findAmbiguity(pad)
+                if ambiguities:
+                    if self.solveAmbiguity:
+                        self.fixAmbiguity(self.programs.index(program), pad)
+                    else:
+                        raise Exception("Ambiguity between program %s/%s and %s" % (self.programs.index(program), pad, ambiguities))
+            for knob in program.knobs:
+                ambiguities = self.findAmbiguity(knob)
+                if ambiguities:
+                    if self.solveAmbiguity:
+                        self.fixAmbiguity(self.programs.index(program), knob)
+                    else:
+                        raise Exception("Ambiguity between program %s/%s and %s" % (self.programs.index(program), knob, ambiguities))
+
+    def findAmbiguity(self, toCheck: Union[LPD8Program.Pad, LPD8Program.Knob]) -> List[Union[LPD8Program.Pad, LPD8Program.Knob]]:
+        ambiguities = []
+        for program in self.programs:
+            if type(toCheck) is LPD8Program.Pad:
+                for pad in program.pads:
+                    if toCheck.note == pad.note or toCheck.controlChange == pad.controlChange or toCheck.programChange == pad.programChange:
+                        ambiguities.append(pad)
+                for knob in program.knobs:
+                    if toCheck.controlChange == knob.controlChange:
+                        ambiguities.append(knob)
+            elif type(toCheck) is LPD8Program.Knob:
+                for knob in program.knobs:
+                    if toCheck.controlChange == knob.controlChange:
+                        ambiguities.append(knob)
+                for pad in program.pads:
+                    if toCheck.controlChange == pad.controlChange:
+                        ambiguities.append(pad)
+
+        return ambiguities
+
+    def fixAmbiguity(self, programIndex: int, toFix: Union[LPD8Program.Pad, LPD8Program.Knob]):
+        """Increase pad/knob values until no ambiguity is present."""
+        if type(toFix) is LPD8Program.Pad:
+            for i in range(127):    # Fix all note conflicts
+                ambiguities = self.findAmbiguity(toFix)
+                if not [x for x in ambiguities if x.note == toFix.note]:
+                    break
+                toFix.note = (toFix.note + 1) % 128
+            else:
+                raise Exception("Couldn't fix note ambiguity between program %s/%s and %s" % (programIndex, toFix, ambiguities))
+
+            for i in range(127):    # Fix all controlchange conflicts
+                ambiguities = self.findAmbiguity(toFix)
+                if not [x for x in ambiguities if x.controlChange == toFix.controlChange]:
+                    break
+                toFix.controlChange = (toFix.controlChange + 1) % 128
+            else:
+                raise Exception("Couldn't fix controlChange ambiguity between program %s/%s and %s" % (programIndex, toFix, ambiguities))
+
+            for i in range(127):    # Fix all controlchange conflicts
+                ambiguities = self.findAmbiguity(toFix)
+                if not [x for x in ambiguities if x.programChange == toFix.programChange]:
+                    break
+                toFix.programChange = (toFix.programChange + 1) % 128
+            else:
+                raise Exception("Couldn't fix programChange ambiguity between program %s/%s and %s" % (programIndex, toFix, ambiguities))
+
+        elif type(toFix) is LPD8Program.Knob:
+            for i in range(127):    # Fix all note conflicts
+                ambiguities = self.findAmbiguity(toFix)
+                if not [x for x in ambiguities if x.controlChange == toFix.controlChange]:
+                    break
+                toFix.controlChange = (toFix.controlChange + 1) % 128
+            else:
+                raise Exception("Couldn't fix controlChange ambiguity between program %s/%s and %s" % (programIndex, toFix, ambiguities))
+
+        self.writeSysex(self.programs[programIndex].writeProgram())
+
+    def findCallback(self, note: int, cc: int, pc: int, value: int=None):
+        for cb in self.cbList:
+            if note is not None:
+                if cb.note == note:
+                    for callback in cb.callbacks:
+                        callback(note, None, None, value)
+                    return
+            if cc is not None:
+                if cb.cc == cc:
+                    for callback in cb.callbacks:
+                        callback(None, cc, None, value)
+                    return
+            if pc is not None:
+                if cb.cc == cc:
+                    for callback in cb.callbacks:
+                        callback(None, None, pc, value)
+                    return
+
+
+    def tick(self):
+        # TODO: Check midi device if still alive
+        # TODO: Write midi messages
+        # TODO: Read midi messages
+        # TODO: Process messages, call callbacks
+        pass
+
+    def writeSysex(self, data: List[int]):
+        raise NotImplementedError
+
+    def writeNote(self):
+        raise NotImplementedError
+
+    def readMidi(self, timeout: float=0):
+        raise NotImplementedError
+
+    def parseSysex(self):
+        pass
+
+    def parseNote(self):
+        pass
+
+    def parseControlChange(self):
+        pass
+
+    def parseProgramChange(self):
+        pass
