@@ -1,4 +1,5 @@
 from typing import List, Union
+import time
 
 class LPD8Program():
     """LPD8 Program Abstraction
@@ -41,7 +42,7 @@ class LPD8Program():
         if not sysexData[3:6] == [0x63, 0x00, 0x3A] and 1 <= sysexData[7] <= 4:
             raise Exception("Commandbytes (3:6) invalid: 0x%X 0x%X 0x%X 0x%X (should be 0x63 0x00 0x3A 0x0X with X=[0..3])" % tuple(sysexData[3:6]))
 
-        self.programIndex = sysexData[6]
+        self.programIndex = sysexData[6] - 1
         self.pads = []  # type: List[LPD8Program.Pad]
         self.knobs = []  # type: List[LPD8Program.Knob]
         for i in range(8):
@@ -59,11 +60,11 @@ class LPD8Program():
         data = []
         data += [0x47, 0x7F, 0x75, 0x61, 0x00, 0x3A]
 
-        if not 1 <= self.programIndex <= 4:
-            raise Exception("Program index out of range: %s (must be 1-4)" % self.programIndex)
-        data += [self.programIndex]
+        if not 0 <= self.programIndex <= 3:
+            raise Exception("Program index out of range: %s (must be 0-3)" % self.programIndex)
+        data += [self.programIndex + 1]
 
-        data += [0x06]  # ???
+        data += [0x06]  # ??? Midi channel TODO: Does this actually influence any behaviour?
 
         if not len(self.pads) == 8:
             raise Exception("Program has too few or too many pads: %s (must be 8)" % len(self.pads))
@@ -100,17 +101,18 @@ class LPD8Device():
             self.callbacks = []
 
     def __init__(self, solveAmbiguity: bool=False):
-        # TODO: Check programs for amguity -> exception/warning if no-override is set?
-        # TODO: Update programs to be unambiguous
-
         self.programs = [None, None, None, None]  # type: List[LPD8Program]
         self.solveAmbiguity = solveAmbiguity
+
+        self.setupComplete = False
+        self.lastProgramWrite = time.time()
 
         self.getDevice()
         self.getPrograms()
         self.checkAmbiguity()
 
         # From this point programs must not be changed
+        self.setupComplete = True
 
         # Set up Callback containers
         self.cbList = []
@@ -118,7 +120,7 @@ class LPD8Device():
             for pad in program.pads:
                 self.cbList.append(LPD8Device.CB(pad.note, pad.controlChange, pad.programChange))
             for knob in program.knobs:
-                self.cbList.append(LPD8Device.CB(knob.controlChange))
+                self.cbList.append(LPD8Device.CB(None, knob.controlChange, None))
 
 
     def getDevice(self):
@@ -128,18 +130,20 @@ class LPD8Device():
     def getPrograms(self):
         for i in range(4):
             self.writeSysex([0x47, 0x7F, 0x75, 0x63, 0x00, 0x01, 1+i])  # Request program 1 to 4
-            self.readMidi(1)    # Wait up to one second for response
+            self.readMidi(True)    # Wait up to one second for response
             if self.programs[i] is None:    # If response came within one second, program slot will be filled
                 raise Exception("Reading Program data timed out")
 
     def checkAmbiguity(self):
         # Iterate over all settings and make sure they're unique. Otherwise throw exception
+        writePrograms = False
         for program in self.programs:
             for pad in program.pads:
                 ambiguities = self.findAmbiguity(pad)
                 if ambiguities:
                     if self.solveAmbiguity:
                         self.fixAmbiguity(self.programs.index(program), pad)
+                        writePrograms = True
                     else:
                         raise Exception("Ambiguity between program %s/%s and %s" % (self.programs.index(program), pad, ambiguities))
             for knob in program.knobs:
@@ -147,8 +151,14 @@ class LPD8Device():
                 if ambiguities:
                     if self.solveAmbiguity:
                         self.fixAmbiguity(self.programs.index(program), knob)
+                        writePrograms = True
                     else:
                         raise Exception("Ambiguity between program %s/%s and %s" % (self.programs.index(program), knob, ambiguities))
+
+        if writePrograms:
+            for program in self.programs:
+                self.writeSysex(program.writeProgram())
+                time.sleep(0.3)     # If write commands are sent too fast, it won't work :/
 
     def findAmbiguity(self, toCheck: Union[LPD8Program.Pad, LPD8Program.Knob]) -> List[Union[LPD8Program.Pad, LPD8Program.Knob]]:
         ambiguities = []
@@ -168,14 +178,17 @@ class LPD8Device():
                     if toCheck.controlChange == pad.controlChange:
                         ambiguities.append(pad)
 
+        if toCheck in ambiguities:
+            ambiguities.remove(toCheck)
         return ambiguities
 
     def fixAmbiguity(self, programIndex: int, toFix: Union[LPD8Program.Pad, LPD8Program.Knob]):
         """Increase pad/knob values until no ambiguity is present."""
+        print("fixing ambiguity of: %s (Program %s)" % (toFix, programIndex))
         if type(toFix) is LPD8Program.Pad:
             for i in range(127):    # Fix all note conflicts
                 ambiguities = self.findAmbiguity(toFix)
-                if not [x for x in ambiguities if x.note == toFix.note]:
+                if not [x for x in [x for x in ambiguities if type(x) is LPD8Program.Pad] if x.note == toFix.note]:
                     break
                 toFix.note = (toFix.note + 1) % 128
             else:
@@ -191,7 +204,7 @@ class LPD8Device():
 
             for i in range(127):    # Fix all controlchange conflicts
                 ambiguities = self.findAmbiguity(toFix)
-                if not [x for x in ambiguities if x.programChange == toFix.programChange]:
+                if not [x for x in [x for x in ambiguities if type(x) is LPD8Program.Pad] if x.programChange == toFix.programChange]:
                     break
                 toFix.programChange = (toFix.programChange + 1) % 128
             else:
@@ -206,14 +219,19 @@ class LPD8Device():
             else:
                 raise Exception("Couldn't fix controlChange ambiguity between program %s/%s and %s" % (programIndex, toFix, ambiguities))
 
-        self.writeSysex(self.programs[programIndex].writeProgram())
+        print("                -> %s" % toFix)
 
-    def findCallback(self, note: int, cc: int, pc: int, value: int=None):
+    def findCallback(self, noteon: int, noteoff: int, cc: int, pc: int, value: int=None):
         for cb in self.cbList:
-            if note is not None:
-                if cb.note == note:
+            if noteon is not None:
+                if cb.note == noteon:
                     for callback in cb.callbacks:
-                        callback(note, None, None, value)
+                        callback(noteon, None, None, None, value)
+                    return
+            if noteoff is not None:
+                if cb.note == noteoff:
+                    for callback in cb.callbacks:
+                        callback(None, noteoff, None, None, value)
                     return
             if cc is not None:
                 if cb.cc == cc:
@@ -229,10 +247,17 @@ class LPD8Device():
 
     def tick(self):
         # TODO: Check midi device if still alive
-        # TODO: Write midi messages
-        # TODO: Read midi messages
-        # TODO: Process messages, call callbacks
-        pass
+        self.readMidi()
+        # TODO: Write sysex to get current program every 100ms or so -> Don't wait for reply (non-blocking!)
+        # TODO: Write pad-note-ons after program change
+
+
+    def writeProgram(self, data: List[int]):
+        """If programs are written too quickly, they won't be saved. Thanks Akai!"""
+        while self.lastProgramWrite + 0.3 < time.time():
+            pass
+        self.writeSysex(data)
+        self.lastProgramWrite = time.time()
 
     def writeSysex(self, data: List[int]):
         raise NotImplementedError
@@ -240,17 +265,19 @@ class LPD8Device():
     def writeNote(self):
         raise NotImplementedError
 
-    def readMidi(self, timeout: float=0):
+    def readMidi(self, waitForProgram: bool=False):
         raise NotImplementedError
 
-    def parseSysex(self):
-        pass
+    def parseSysex(self, data: List[int]) -> bool:
+        """Parse an incoming sysex message
+        data is the raw sysex data without the start and stop bytes
+        Returns true is a program was received"""
+        try:
+            newProgram = LPD8Program()
+            newProgram.readProgram(list(data))
+            self.programs[newProgram.programIndex] = newProgram
+            return True
+        except:
+            pass
 
-    def parseNote(self):
-        pass
-
-    def parseControlChange(self):
-        pass
-
-    def parseProgramChange(self):
-        pass
+        return False
