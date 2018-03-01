@@ -1,4 +1,4 @@
-from typing import List, Union
+from typing import List, Union, Tuple, Callable
 import time
 
 class LPD8Program():
@@ -64,7 +64,7 @@ class LPD8Program():
             raise Exception("Program index out of range: %s (must be 0-3)" % self.programIndex)
         data += [self.programIndex + 1]
 
-        data += [0x06]  # ??? Midi channel TODO: Does this actually influence any behaviour?
+        data += [0x06]  # Midi channel fixed to 6   # TODO: Make settable?
 
         if not len(self.pads) == 8:
             raise Exception("Program has too few or too many pads: %s (must be 8)" % len(self.pads))
@@ -94,11 +94,37 @@ class LPD8Program():
 
 class LPD8Device():
     class CB():
-        def __init__(self, note, cc, pc):
+        def __init__(self):
+            self.funcs = []
+
+    class PadNoteCB(CB):
+        def __init__(self, program: int, pad: int, note:int):
+            super(LPD8Device.PadNoteCB, self).__init__()
+            self.program = program
+            self.pad = pad
             self.note = note
+
+    class PadCCCB(CB):
+        def __init__(self, program: int, pad: int, cc: int):
+            super(LPD8Device.PadCCCB, self).__init__()
+            self.program = program
+            self.pad = pad
             self.cc = cc
+
+    class PadPCCB(CB):
+        def __init__(self, program: int, pad: int, pc: int):
+            super(LPD8Device.PadPCCB, self).__init__()
+            self.program = program
+            self.pad = pad
             self.pc = pc
-            self.callbacks = []
+
+    class KnobCCCB(CB):
+        def __init__(self, program: int, knob: int, cc: int):
+            super(LPD8Device.KnobCCCB, self).__init__()
+            self.program = program
+            self.knob = knob
+            self.cc = cc
+
 
     def __init__(self, solveAmbiguity: bool=False):
         self.programs = [None, None, None, None]  # type: List[LPD8Program]
@@ -106,6 +132,9 @@ class LPD8Device():
 
         self.setupComplete = False
         self.lastProgramWrite = time.time()
+        self.lastProgramQuery = time.time()
+        self.programChangeCB = None
+        self.currentProgram = 0
 
         self.getDevice()
         self.getPrograms()
@@ -114,14 +143,7 @@ class LPD8Device():
         # From this point programs must not be changed
         self.setupComplete = True
 
-        # Set up Callback containers
         self.cbList = []
-        for program in self.programs:
-            for pad in program.pads:
-                self.cbList.append(LPD8Device.CB(pad.note, pad.controlChange, pad.programChange))
-            for knob in program.knobs:
-                self.cbList.append(LPD8Device.CB(None, knob.controlChange, None))
-
 
     def getDevice(self):
         """Open midi IO to LPD8"""
@@ -133,6 +155,8 @@ class LPD8Device():
             self.readMidi(True)    # Wait up to one second for response
             if self.programs[i] is None:    # If response came within one second, program slot will be filled
                 raise Exception("Reading Program data timed out")
+
+        self.writeSysex(data=[0x47, 0x7F, 0x75, 0x64, 0x00, 0x00])  # Query active program
 
     def checkAmbiguity(self):
         # Iterate over all settings and make sure they're unique. Otherwise throw exception
@@ -159,6 +183,8 @@ class LPD8Device():
             for program in self.programs:
                 self.writeSysex(program.writeProgram())
                 time.sleep(0.3)     # If write commands are sent too fast, it won't work :/
+
+        self.writeSysex(data=[0x47, 0x7F, 0x75, 0x62, 0x00, 0x00, 0x01, 0x01])   # Set active program to 1
 
     def findAmbiguity(self, toCheck: Union[LPD8Program.Pad, LPD8Program.Knob]) -> List[Union[LPD8Program.Pad, LPD8Program.Knob]]:
         ambiguities = []
@@ -221,35 +247,37 @@ class LPD8Device():
 
         print("                -> %s" % toFix)
 
-    def findCallback(self, noteon: int, noteoff: int, cc: int, pc: int, value: int=None):
+    def triggerCallback(self, noteon: int, noteoff: int, cc: int, pc: int, value: int=None):
+        # Callback signature: callback(programNum:int, padNum: int, knobNum: int, value: int, noteon: int, noteoff: int, cc: int, pc: int) -> None
         for cb in self.cbList:
-            if noteon is not None:
-                if cb.note == noteon:
-                    for callback in cb.callbacks:
-                        callback(noteon, None, None, None, value)
-                    return
-            if noteoff is not None:
-                if cb.note == noteoff:
-                    for callback in cb.callbacks:
-                        callback(None, noteoff, None, None, value)
-                    return
-            if cc is not None:
-                if cb.cc == cc:
-                    for callback in cb.callbacks:
-                        callback(None, cc, None, value)
-                    return
-            if pc is not None:
-                if cb.cc == cc:
-                    for callback in cb.callbacks:
-                        callback(None, None, pc, value)
-                    return
+            if type(cb) == LPD8Device.PadNoteCB and noteon is not None and cb.note == noteon:
+                for func in cb.funcs:
+                    func(cb.program, cb.pad, None, value, noteon, None, None, None)
+                return
+            elif type(cb) == LPD8Device.PadCCCB and noteoff is not None and cb.note == noteoff:
+                for func in cb.funcs:
+                    func(cb.program, cb.pad, None, value, None, noteoff, None, None)
+                return
+            elif type(cb) == LPD8Device.PadPCCB and pc is not None and cb.pc == pc:
+                for func in cb.funcs:
+                    func(cb.program, cb.pad, None, None, None, None, None, pc)
+                return
+            elif type(cb) == LPD8Device.KnobCCCB and cc is not None and cb.cc == cc:
+                for func in cb.funcs:
+                    func(cb.program, None, cb.knob, value, None, None, cc, None)
+                return
 
 
-    def tick(self):
+
+
+
+    def tick(self, queryInterval: float=0.1):
         # TODO: Check midi device if still alive
         self.readMidi()
-        # TODO: Write sysex to get current program every 100ms or so -> Don't wait for reply (non-blocking!)
-        # TODO: Write pad-note-ons after program change
+
+        if time.time() > self.lastProgramQuery + queryInterval:
+            self.writeSysex(data=[0x47, 0x7F, 0x75, 0x64, 0x00, 0x00])  # Query current program
+            self.lastProgramQuery = time.time()
 
 
     def writeProgram(self, data: List[int]):
@@ -259,25 +287,139 @@ class LPD8Device():
         self.writeSysex(data)
         self.lastProgramWrite = time.time()
 
+    def lightPad(self, pad:int, on:bool =True):
+        if not 0 <= pad <= 7:
+            raise("Pad out of range: %s (must be 0-7)" % pad)
+        curProg = self.programs[self.currentProgram]
+        pad = curProg.pads[pad]
+
+        self.writeNote(pad.note, on)
+
+    def addPadCB(self, programNum: int, padNum: int, CB: Callable[[int, int, int, int, int], None], note: bool=True, cc: bool=False, pc: bool=False):
+        if not 0 <= programNum <= 3:
+            raise Exception("Program index out of range: %s (must be 0-3)" % programNum)
+        if not 0 <= padNum <= 7:
+            raise("Pad out of range: %s (must be 0-7)" % padNum)
+
+        pad = self.programs[programNum].pads[padNum]
+
+        if note:
+            for cb in self.cbList:
+                if type(cb) == LPD8Device.PadNoteCB and cb.note == pad.note:
+                    if CB not in cb.funcs:
+                        cb.funcs.append(CB)
+                    break
+            else:
+                newCB = LPD8Device.PadNoteCB(programNum, padNum, pad.note)
+                newCB.funcs.append(CB)
+                self.cbList.append(newCB)
+
+        if cc:
+            for cb in self.cbList:
+                if type(cb) == LPD8Device.PadCCCB and cb.cc == pad.controlChange:
+                    if CB not in cb.funcs:
+                        cb.funcs.append(CB)
+                    break
+            else:
+                newCB = LPD8Device.PadCCCB(programNum, padNum, pad.controlChange)
+                newCB.funcs.append(CB)
+                self.cbList.append(newCB)
+
+        if pc:
+            for cb in self.cbList:
+                if type(cb) == LPD8Device.PadPCCB and cb.pc == pad.programChange:
+                    if CB not in cb.funcs:
+                        cb.funcs.append(CB)
+                    break
+            else:
+                newCB = LPD8Device.PadPCCB(programNum, padNum, pad.controlChange)
+                newCB.funcs.append(CB)
+                self.cbList.append(newCB)
+
+    def removePadCB(self, programNum: int, padNum: int, CB: Callable[[int, int, int, int, int], None], note: bool=True, cc: bool=False, pc: bool=False):
+        if not 0 <= programNum <= 3:
+            raise Exception("Program index out of range: %s (must be 0-3)" % programNum)
+        if not 0 <= padNum <= 7:
+            raise("Pad out of range: %s (must be 0-7)" % padNum)
+
+        pad = self.programs[programNum].pads[padNum]
+
+        if note:
+            for cb in self.cbList:
+                if type(cb) == LPD8Device.PadNoteCB and cb.note == pad.note:
+                    if CB in cb.funcs:
+                        cb.funcs.remove(CB)
+
+        if cc:
+            for cb in self.cbList:
+                if type(cb) == LPD8Device.PadCCCB and cb.cc == pad.controlChange:
+                    if CB in cb.funcs:
+                        cb.funcs.remove(CB)
+
+        if pc:
+            for cb in self.cbList:
+                if type(cb) == LPD8Device.PadPCCB and cb.pc == pad.programChange:
+                    if CB in cb.funcs:
+                        cb.funcs.remove(CB)
+
+    def addKnobCB(self, programNum: int, knobNum: int, CB: Callable[[int, int, int, int, int], None]):
+        if not 0 <= programNum <= 3:
+            raise Exception("Program index out of range: %s (must be 0-3)" % programNum)
+        if not 0 <= knobNum <= 7:
+            raise("Pad out of range: %s (must be 0-7)" % knobNum)
+
+        knob = self.programs[programNum].knobs[knobNum]
+        for cb in self.cbList:
+            if type(cb) == LPD8Device.KnobCCCB and cb.cc == knob.controlChange:
+                if CB not in cb.funcs:
+                    cb.funcs.append(CB)
+                    break
+            else:
+                newCB = LPD8Device.KnobCCCB(programNum, knobNum, knob.controlChange)
+                newCB.funcs.append(CB)
+                self.cbList.append(newCB)
+
+    def removeKnobCB(self, programNum: int, knobNum: int, CB: Callable[[int, int, int, int, int], None]):
+        if not 0 <= programNum <= 3:
+            raise Exception("Program index out of range: %s (must be 0-3)" % programNum)
+        if not 0 <= knobNum <= 7:
+            raise("Pad out of range: %s (must be 0-7)" % knobNum)
+
+        knob = self.programs[programNum].knobs[knobNum]
+        for cb in self.cbList:
+            if type(cb) == LPD8Device.KnobCCCB and cb.cc == knob.controlChange:
+                if CB in cb.funcs:
+                    cb.funcs.remove(CB)
+
+    # TODO: enablePadToggle -> set toggle bit for pad and write new program out
+
     def writeSysex(self, data: List[int]):
         raise NotImplementedError
 
-    def writeNote(self):
+    def writeNote(self, note: int, on: bool=True):
         raise NotImplementedError
 
     def readMidi(self, waitForProgram: bool=False):
         raise NotImplementedError
 
-    def parseSysex(self, data: List[int]) -> bool:
+    def parseSysex(self, data: Tuple[int, ...]) -> bool:
         """Parse an incoming sysex message
         data is the raw sysex data without the start and stop bytes
-        Returns true is a program was received"""
+        Returns true if a program was received"""
         try:
+            # Try to parse message as lpd8-program
             newProgram = LPD8Program()
             newProgram.readProgram(list(data))
             self.programs[newProgram.programIndex] = newProgram
             return True
         except:
             pass
+
+        if data[:-1] == (0x47, 0x7F, 0x75, 0x64, 0x00, 0x01):
+            newprog = data[6] - 1   # return value is 1-indexed
+            if not newprog == self.currentProgram and callable(self.programChangeCB):
+                self.programChangeCB(newprog)
+            self.currentProgram = newprog
+            return False
 
         return False
