@@ -8,7 +8,7 @@ Quickstart
 
 Python-lpd8 works by handling all the midi communication with the lpd8 device for you.
 All you have to do is decide which callback you want attached to which pad or knob.
-This quickstart will show you how to use python-lpd8 with `Link mido <https://mido.readthedocs.io/>`, a MIDI library.
+This quickstart will show you how to use python-lpd8 with `mido <https://mido.readthedocs.io/>`_, a MIDI library.
 The mido interface is currently the only one that is currently available.
 
 

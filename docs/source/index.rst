@@ -48,4 +48,6 @@ While you've activated the first program and are in PAD-mode you should get mess
    :caption: Contents:
 
    quickstart
-   test
+   lpd8
+   ambiguity
+   callbacks
