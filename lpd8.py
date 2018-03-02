@@ -155,19 +155,20 @@ class LPD8Device():
             self.readMidi(True)    # Wait up to one second for response
             if self.programs[i] is None:    # If response came within one second, program slot will be filled
                 raise Exception("Reading Program data timed out")
+            for pad in self.programs[i].pads:    # Set toggle to off for all pads
+                pad.toggle = False
 
         self.writeSysex(data=[0x47, 0x7F, 0x75, 0x64, 0x00, 0x00])  # Query active program
 
+
     def checkAmbiguity(self):
         # Iterate over all settings and make sure they're unique. Otherwise throw exception
-        writePrograms = False
         for program in self.programs:
             for pad in program.pads:
                 ambiguities = self.findAmbiguity(pad)
                 if ambiguities:
                     if self.solveAmbiguity:
                         self.fixAmbiguity(self.programs.index(program), pad)
-                        writePrograms = True
                     else:
                         raise Exception("Ambiguity between program %s/%s and %s" % (self.programs.index(program), pad, ambiguities))
             for knob in program.knobs:
@@ -175,14 +176,13 @@ class LPD8Device():
                 if ambiguities:
                     if self.solveAmbiguity:
                         self.fixAmbiguity(self.programs.index(program), knob)
-                        writePrograms = True
                     else:
                         raise Exception("Ambiguity between program %s/%s and %s" % (self.programs.index(program), knob, ambiguities))
 
-        if writePrograms:
-            for program in self.programs:
-                self.writeSysex(program.writeProgram())
-                time.sleep(0.3)     # If write commands are sent too fast, it won't work :/
+
+        for program in self.programs:
+            self.writeSysex(program.writeProgram())
+            time.sleep(0.3)     # If write commands are sent too fast, it won't work :/
 
         self.setActiveProgram(0)
 
@@ -248,13 +248,13 @@ class LPD8Device():
         print("                -> %s" % toFix)
 
     def triggerCallback(self, noteon: int, noteoff: int, cc: int, pc: int, value: int=None):
-        # Callback signature: callback(programNum:int, padNum: int, knobNum: int, value: int, noteon: int, noteoff: int, cc: int, pc: int) -> None
+        # Callback signature: callback(programNum: int, padNum: int, knobNum: int, value: int, noteon: int, noteoff: int, cc: int, pc: int) -> None
         for cb in self.cbList:
             if type(cb) == LPD8Device.PadNoteCB and noteon is not None and cb.note == noteon:
                 for func in cb.funcs:
                     func(cb.program, cb.pad, None, value, noteon, None, None, None)
                 return
-            elif type(cb) == LPD8Device.PadCCCB and noteoff is not None and cb.note == noteoff:
+            elif type(cb) == LPD8Device.PadNoteCB and noteoff is not None and cb.note == noteoff:
                 for func in cb.funcs:
                     func(cb.program, cb.pad, None, value, None, noteoff, None, None)
                 return

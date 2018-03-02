@@ -1,7 +1,6 @@
-from typing import List, Union
+from typing import List
 
-from lpd8 import LPD8Program, LPD8Device
-from time import sleep
+from lpd8 import LPD8Device
 
 import mido
 import time
