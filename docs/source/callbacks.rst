@@ -3,8 +3,8 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-LPD8
-====
+Callbacks
+=========
 
 Python-lpd8 works with callbacks to let you know that a pad has been pressed or a knob has been turned.
 Information about which program's pad/knob has been actuated is passed to the callback.
