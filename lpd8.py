@@ -184,7 +184,7 @@ class LPD8Device():
                 self.writeSysex(program.writeProgram())
                 time.sleep(0.3)     # If write commands are sent too fast, it won't work :/
 
-        self.writeSysex(data=[0x47, 0x7F, 0x75, 0x62, 0x00, 0x00, 0x01, 0x01])   # Set active program to 1
+        self.setActiveProgram(0)
 
     def findAmbiguity(self, toCheck: Union[LPD8Program.Pad, LPD8Program.Knob]) -> List[Union[LPD8Program.Pad, LPD8Program.Knob]]:
         ambiguities = []
@@ -267,18 +267,12 @@ class LPD8Device():
                     func(cb.program, None, cb.knob, value, None, None, cc, None)
                 return
 
-
-
-
-
-    def tick(self, queryInterval: float=0.1):
-        # TODO: Check midi device if still alive
+    def tick(self, queryInterval: float=0.1) -> None:
         self.readMidi()
 
         if time.time() > self.lastProgramQuery + queryInterval:
             self.writeSysex(data=[0x47, 0x7F, 0x75, 0x64, 0x00, 0x00])  # Query current program
             self.lastProgramQuery = time.time()
-
 
     def writeProgram(self, data: List[int]):
         """If programs are written too quickly, they won't be saved. Thanks Akai!"""
@@ -391,7 +385,21 @@ class LPD8Device():
                 if CB in cb.funcs:
                     cb.funcs.remove(CB)
 
-    # TODO: enablePadToggle -> set toggle bit for pad and write new program out
+    def setPadToggle(self, programNum: int, padNum: int, toggle: bool=False):
+        if not 0 <= programNum <= 3:
+            raise Exception("Program index out of range: %s (must be 0-3)" % programNum)
+        if not 0 <= padNum <= 7:
+            raise("Pad out of range: %s (must be 0-7)" % padNum)
+
+        program = self.programs[programNum]
+        pad = program.pads[padNum]
+        pad.toggle = toggle
+        self.writeSysex(program.writeProgram())
+
+    def setActiveProgram(self, programNum: int):
+        if not 0 <= programNum <= 3:
+            raise Exception("Program index out of range: %s (must be 0-3)" % programNum)
+        self.writeSysex(data=[0x47, 0x7F, 0x75, 0x62, 0x00, 0x00, 0x01, programNum])
 
     def writeSysex(self, data: List[int]):
         raise NotImplementedError
