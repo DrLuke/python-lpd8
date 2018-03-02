@@ -155,11 +155,12 @@ class LPD8Device():
             self.readMidi(True)    # Wait up to one second for response
             if self.programs[i] is None:    # If response came within one second, program slot will be filled
                 raise Exception("Reading Program data timed out")
-            for pad in self.programs[i].pads:       # Set toggle to off for all pads
-                pad.toggle = False
-            for knob in self.programs[i].knobs:     # Set knob range to 0-127
-                knob.low = 0
-                knob.high = 127
+            if self.solveAmbiguity:     # Only do this when user consents!
+                for pad in self.programs[i].pads:       # Set toggle to off for all pads
+                    pad.toggle = False
+                for knob in self.programs[i].knobs:     # Set knob range to 0-127
+                    knob.low = 0
+                    knob.high = 127
 
         self.writeSysex(data=[0x47, 0x7F, 0x75, 0x64, 0x00, 0x00])  # Query active program
 
