@@ -330,7 +330,7 @@ class LPD8Device():
                         cb.funcs.append(CB)
                     break
             else:
-                newCB = LPD8Device.PadPCCB(programNum, padNum, pad.controlChange)
+                newCB = LPD8Device.PadPCCB(programNum, padNum, pad.programChange)
                 newCB.funcs.append(CB)
                 self.cbList.append(newCB)
 
